@@ -1,0 +1,213 @@
+---
+title: "employment_acreage_merged_data"
+author: "Luc Fabing"
+date: "2026-03-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r cars}
+library(dplyr)
+library(forcats)
+library(readr)
+library(readxl)
+library(stringr)
+```
+
+```{r}
+# Create/import county keys for calfire units
+
+county_to_calfire <- read.csv("data/Counties by Calfire Unit.csv")
+
+# Create a data frame for all 58 California counties and their corresponding abbreviations
+ca_county_abbr <- data.frame(
+  county = c(
+    "Alameda", "Alpine", "Amador", "Butte", "Calaveras", "Colusa", "Contra Costa", 
+    "Del Norte", "El Dorado", "Fresno", "Glenn", "Humboldt", "Imperial", "Inyo", 
+    "Kern", "Kings", "Lake", "Lassen", "Los Angeles", "Madera", "Marin", "Mariposa", 
+    "Mendocino", "Merced", "Modoc", "Mono", "Monterey", "Napa", "Nevada", "Orange", 
+    "Placer", "Plumas", "Riverside", "Sacramento", "San Benito", "San Bernardino", 
+    "San Diego", "San Francisco", "San Joaquin", "San Luis Obispo", "San Mateo", 
+    "Santa Barbara", "Santa Clara", "Santa Cruz", "Shasta", "Sierra", "Siskiyou", 
+    "Solano", "Sonoma", "Stanislaus", "Sutter", "Tehama", "Trinity", "Tulare", 
+    "Tuolumne", "Ventura", "Yolo", "Yuba"
+  ),
+  abbreviation = c(
+    "ALA", "ALP", "AMA", "BUT", "CAL", "COL", "CC", "DN", "ED", "FRE", "GLE", "HUM", 
+    "IMP", "INY", "KER", "KIN", "LAK", "LAS", "LA", "MAD", "MRN", "MPA", "MEN", "MER", 
+    "MOD", "MNO", "MON", "NAP", "NEV", "ORA", "PLA", "PLU", "RIV", "SAC", "SBT", "SBD", 
+    "SD", "SF", "SJ", "SLO", "SM", "SB", "SCL", "SCR", "SHA", "SIE", "SIS", "SOL", 
+    "SON", "STA", "SUT", "TEH", "TRI", "TUL", "TUO", "VEN", "YOL", "YUB"
+  ),
+  stringsAsFactors = FALSE
+)
+
+#complete county key
+county_key <- left_join(county_to_calfire, 
+                        ca_county_abbr, 
+                        by = c("County" = "county")
+                        ) |>
+  select(county = County, 
+         cal_fire_unit = CAL.FIRE.Unit.Name,
+         unit_acronym = Unit.Acronym,
+         county_abbr = abbreviation)
+
+county_key
+
+```
+
+```{r}
+# read in county-level IMPLAN data for all available years
+implan_data <- read.csv("data/IMPLAN County Data.csv")
+
+# read in additional years of statewide implan data
+implan_data_extra_years <- read_xlsx("data/SOC Codes + COE Data.xlsx")
+```
+```{r}
+implan_data_extra_years
+```
+
+
+```{r}
+# clean IMPLAN data and merge with calfire unit data
+
+implan_data_cal_fire <- implan_data |>
+
+  # extract county 
+    mutate(county = 
+         str_remove(Occupation.County, "County, California") |>
+          trimws()
+  ) |> 
+  # megre in county abbreviations
+  left_join(county_key, by = "county")  |>
+
+  mutate(unit_acronym = 
+           ifelse(county_abbr == "SF", "SF", unit_acronym)) |>
+  mutate(unit_acronym = factor(unit_acronym)) |> 
+  mutate(unit_grouped = fct_collapse(unit_acronym,
+    "SCU_TCU" = c("SCU / TCU", "SCU", "TCU"))) |>
+  select(county, 
+         county_abbr, 
+         Occupation.Data.Year, 
+         cal_fire_unit, 
+         cal_fire_unit_acronym = unit_acronym,
+         cal_fire_unit_grouped = unit_grouped,
+         Occupation.Occupation,
+         everything()) |>
+  arrange(county, Occupation.Data.Year)
+
+```
+
+```{r}
+implan_data_cal_fire
+```
+
+```{r}
+#read in COE data, select relevant columns (SOC Code and scale factor only)
+
+coe_data <- read_excel("data/SOC Codes + COE Data.xlsx") |>
+  select(`SOC Code` = `SOC Code`, `2024 Share of Jobs in Wildfire Risk Reduction NBS`)
+
+coe_data |> colnames()
+
+```
+
+```{r}
+# Add scaled hours to implan data using COE. Then select relevant columns to merge with treatment tracker data
+
+employment_data_scaled <- implan_data_cal_fire |>
+  #convert hours worked to numeric, need to remove commas
+  mutate(Occupation.Hours.Worked = as.numeric(str_remove_all(Occupation.Hours.Worked, ","))) |>
+  #merge implan data with coe data. Use inner_join to eliminate all unnecessary SOC codes
+  inner_join(coe_data,
+          by = c("Occupation.Occupation.Code" = "SOC Code")) |>
+  mutate(`scaled_hours_worked` = `2024 Share of Jobs in Wildfire Risk Reduction NBS` * `Occupation.Hours.Worked`) |>
+  #select only the columns we care about for the merge with treatment tracker
+  select(county_abbr, 
+         Occupation.Data.Year,
+         cal_fire_unit_grouped,
+         Occupation.Occupation.Code,
+         Occupation.Hours.Worked,
+         scaled_hours_worked) 
+
+employment_data_scaled |> summary()
+```
+```{r}
+# read in treatment tracker data.  
+treatment_tracker_data <- read.csv("data/appended_points_lines_polys.csv") 
+```
+
+```{r}
+#Looks like there are some counties with multiple region codes
+treatment_tracker_data |> distinct(COUNTY, REGION) |> arrange(COUNTY)
+```
+```{r}
+# We only care about ACTIVITY_STATUS == COMPLETE, I think
+treatment_tracker_data |> select(ACTIVITY_STATUS) |> mutate(ACTIVITY_STATUS = factor(ACTIVITY_STATUS)) |> 
+  group_by(ACTIVITY_STATUS) |> summarize(n())
+
+```
+
+```{r}
+#Is TREATMENT_AREA in acres? Or ACTIVITY_QUANTITY? Way fewer NAs for Quantity
+treatment_tracker_data |> select(TREATMENT_AREA) |> summary()
+treatment_tracker_data |> select(ACTIVITY_QUANTITY) |> summary()
+```
+
+
+
+```{r}
+# select relevant variables from treatment tracker data and aggregate by county year. In this case, I'm just going to do county, year, acres. We need to workshop this. 
+
+treatment_tracker_clean <- treatment_tracker_data |> 
+  #filter for only completed treatment
+  filter(ACTIVITY_STATUS == "COMPLETE") |>
+  select(COUNTY, Year, ACTIVITY_QUANTITY, TREATMENT_AREA)
+```
+
+```{r}
+# summarize ACTIVITY_QUANTITY and TREATMENT_AREA for each county year
+
+treatment_data <- treatment_tracker_clean |> group_by(COUNTY, Year) |>
+  summarize(ACTIVITY_QUANTITY = sum(ACTIVITY_QUANTITY, na.rm = TRUE),
+            TREATMENT_AREA = sum(TREATMENT_AREA, na.rm = TRUE),
+            .groups = "drop") |>
+  #filter for relevant years
+    filter(Year == 2014 |
+           Year == 2015 |
+           Year == 2016 |
+           Year == 2017 |
+           Year == 2018 |
+           Year == 2019 |
+           Year == 2020 |
+           Year == 2021 |
+           Year == 2022 |
+           Year == 2023 |
+           Year == 2024 )
+
+```
+
+```{r}
+treatment_data
+```
+
+```{r}
+# Merge employment data with acreage data
+
+# Note: generate start year / end year from start and end data columns. Select county and year first
+# Note: we have hours worked by county, year, soc code. We can get acres by county, year. Any job-specific data will need to be aggregated to the county-year level. For example, for activity type, we would need to calculate what percentage of jobs in a given-county year were each kind of activity. For now, I'm just going to aggregate acres by county year so that we can start running some simple models.
+#Note: I think we will also need to create columns for each SOC code so that each individual SOC code can be a predictor variable
+
+employment_acreage_data <- left_join(employment_data_scaled, 
+                                     treatment_data, 
+                                     by = c("county_abbr" = "COUNTY", "Occupation.Data.Year" = "Year"))
+
+
+```
+
+```{r}
+employment_acreage_data
+```
